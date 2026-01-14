@@ -649,22 +649,6 @@ class Speech:
                 logger.error(f"[TTS] Error generating audio: {e}")
                 continue
 
-    async def load_voice_clone(self, voice: str):
-        """Load reference audio and text for voice cloning"""
-
-        audio_path = os.path.join(self.voice_dir, f"{voice}.wav")
-        text_path = os.path.join(self.voice_dir, f"{voice}.txt")
-
-        with open(text_path, 'r', encoding='utf-8') as f:
-            ref_text = f.read().strip()
-
-        messages = [
-            Message(role="user", content=ref_text),
-            Message(role="assistant", content=AudioContent(audio_url=audio_path))
-        ]
-
-        return messages
-
     def _deserialize_audio_ids(self, audio_tokens: Any) -> List[torch.Tensor]:
         if not audio_tokens:
             return []
@@ -695,130 +679,49 @@ class Speech:
             else:
                 serialized.append(audio_id)
         return serialized
-
-    def prepare_messages_context(self, scene_prompt: str, speaker_desc: str):
-        system_message_l = ["Generate audio following instruction."]
-        scene_desc_l = []
-        if scene_prompt:
-            scene_desc_l.append(scene_prompt)
-        if speaker_desc:
-            if speaker_desc.strip().startswith("SPEAKER"):
-                scene_desc_l.append(speaker_desc)
-            else:
-                scene_desc_l.append(f"SPEAKER0: {speaker_desc}")
-        if scene_desc_l:
-            scene_desc = "\n\n".join(scene_desc_l)
-            system_message_l.append(f"<|scene_desc_start|>\n{scene_desc}\n<|scene_desc_end|>")
-        system_message = Message(
-            role="system",
-            content="\n\n".join(system_message_l),
-        )
-        messages = [system_message]
-        generation_messages: List[Message] = []
-        return messages, generation_messages
-
-    def _get_profile_context(self, voice: str, scene_prompt: str, speaker_desc: str) -> Dict[str, Any]:
-        context = self._voice_context.get(voice)
-        if (
-            context
-            and context.get("method") == "profile"
-            and context["scene_prompt"] == scene_prompt
-            and context["speaker_desc"] == speaker_desc
-        ):
-            return context
-
-        messages, generation_messages = self.prepare_messages_context(scene_prompt, speaker_desc)
-        generated_audio_ids: List[torch.Tensor] = []
-        audio_tokens = db.get_cached_audio_tokens(voice)
-        audio_ids = self._deserialize_audio_ids(audio_tokens)
-
-        context = {
-            "method": "profile",
-            "scene_prompt": scene_prompt,
-            "speaker_desc": speaker_desc,
-            "messages": messages,
-            "generation_messages": generation_messages,
-            "generated_audio_ids": generated_audio_ids,
-            "audio_ids": audio_ids,
-        }
-        self._voice_context[voice] = context
-        return context
     
-    def _get_clone_context(
-        self,
-        voice: str,
-        scene_prompt: str,
-        audio_path: str,
-        text_path: str,
-    ) -> Dict[str, Any]:
-        context = self._voice_context.get(voice)
-        if (
-            context
-            and context.get("method") == "clone"
-            and context["scene_prompt"] == scene_prompt
-            and context["audio_path"] == audio_path
-            and context["text_path"] == text_path
-        ):
-            return context
+    async def load_voice_reference_clone(self, voice: str):
+        """Load reference audio (this is for voice cloning)"""
 
-        messages, generation_messages = self.prepare_messages_context(scene_prompt, "")
+        audio_path = os.path.join(self.voice_dir, f"{voice}.wav")
+        text_path = os.path.join(self.voice_dir, f"{voice}.txt")
 
-        if not os.path.exists(audio_path):
-            raise FileNotFoundError(f"Voice prompt audio file not found: {audio_path}")
-        if not os.path.exists(text_path):
-            raise FileNotFoundError(f"Voice prompt text file not found: {text_path}")
+        with open(text_path, 'r', encoding='utf-8') as f:
+            ref_text = f.read().strip()
 
-        with open(text_path, "r", encoding="utf-8") as f:
-            prompt_text = f.read().strip()
+        messages = [
+            Message(role="user", content=ref_text),
+            Message(role="assistant", content=AudioContent(audio_url=audio_path))
+        ]
 
-        messages.append(Message(role="user", content=prompt_text))
-        messages.append(Message(role="assistant", content=AudioContent(audio_url=audio_path)))
+        return messages
+    
+    def load_voice_reference_profile(self, scene_prompt: str):
+        """Load reference audio and scene prompt for profile"""
 
-        audio_tokens = db.get_cached_audio_tokens(voice)
-        audio_ids = self._deserialize_audio_ids(audio_tokens)
-        if not audio_ids and not audio_tokens:
-            prompt_audio_ids = self.engine.audio_tokenizer.encode(audio_path)
-            audio_ids = [prompt_audio_ids.cpu()]
-            db.update_cached_audio_tokens(voice, self._serialize_audio_ids(audio_ids))
+        system_message = (f"<|scene_desc_start|>\n{scene_prompt}\n\n" + "\n<|scene_desc_end|>")
+    
+        messages = [
+            Message(role="system", content=system_message),
+    
+            Message(role="assistant", content=AudioContent(audio_url="placeholder"))
+        ]
 
-        generated_audio_ids: List[torch.Tensor] = []
-
-        context = {
-            "method": "clone",
-            "scene_prompt": scene_prompt,
-            "audio_path": audio_path,
-            "text_path": text_path,
-            "messages": messages,
-            "generation_messages": generation_messages,
-            "generated_audio_ids": generated_audio_ids,
-            "audio_ids": audio_ids,
-        }
-        self._voice_context[voice] = context
-        return context
-
+        return messages
 
     async def generate_audio_for_sentence(self, text: str, voice: str) -> AsyncGenerator[bytes, None]:
         """Generate audio for text using Higgs streaming"""
 
-        voice_config = await db.get_voice(voice)
-        method = (voice_config.method or "").strip().lower()
-        scene_prompt = (voice_config.scene_prompt or "").strip()
-        speaker_desc = (voice_config.speaker_desc or "").strip()
+        audio_ids = []
+        generated_audio_ids =[]
+        generation_messages =[]
 
-        if method == "clone":
-            audio_path = voice_config.audio_path or os.path.join(self.voice_dir, f"{voice}.wav")
-            text_path = voice_config.text_path or os.path.join(self.voice_dir, f"{voice}.txt")
-            context = self._get_clone_context(voice, scene_prompt, audio_path, text_path)
-        else:
-            context = self._get_profile_context(voice, scene_prompt, speaker_desc)
-        messages = context["messages"]
-        generation_messages = context["generation_messages"]
-        generated_audio_ids = context["generated_audio_ids"]
-        audio_ids = context["audio_ids"]
+        messages = self.load_voice_reference(voice) # no longer just load_voice_reference
 
-        current_generation_messages = generation_messages + [Message(role="user", content=text)]
-        chat_sample = ChatMLSample(messages=messages + current_generation_messages)
-        context_audio_ids = audio_ids + generated_audio_ids if audio_ids or generated_audio_ids else None
+        messages.append(Message(role="user", content=text))
+
+        chat_sample = ChatMLSample(messages=messages)
+        context_audio_ids = audio_ids + generated_audio_ids
 
         # Initialize streaming state
         audio_tokens: list[torch.Tensor] = []
@@ -880,9 +783,6 @@ class Speech:
             if self.engine.model.config.use_delay_pattern:
                 audio_out_ids = revert_delay_pattern(audio_out_ids)
             audio_out_ids = audio_out_ids.clip(0, self.engine.audio_codebook_size - 1)[:, 1:-1]
-            if not audio_ids and not db.get_cached_audio_tokens(voice):
-                audio_ids.append(audio_out_ids.cpu())
-                db.update_cached_audio_tokens(voice, self._serialize_audio_ids(audio_ids))
             generated_audio_ids.append(audio_out_ids.cpu())
 
             generation_messages.append(Message(role="user", content=text))
