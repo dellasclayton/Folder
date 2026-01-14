@@ -37,7 +37,7 @@ from backend.RealtimeSTT import AudioToTextRecorder
 from backend.stream2sentence import generate_sentences_async
 from backend.boson_multimodal.serve.serve_engine import HiggsAudioServeEngine
 from backend.boson_multimodal.data_types import ChatMLSample, Message, AudioContent, TextContent
-from backend.boson_multimodal.model.higgs_audio.utils import revert_delay_pattern as revert_delay_pattern_full
+from backend.boson_multimodal.model.higgs_audio.utils import revert_delay_pattern
 
 from backend.database_director import (db, Character, CharacterCreate, CharacterUpdate, Voice, VoiceCreate, VoiceUpdate, Conversation, ConversationCreate, ConversationUpdate, Message as ConversationMessage, MessageCreate)
 
@@ -878,7 +878,7 @@ class Speech:
         if audio_tokens:
             audio_out_ids = torch.cat(audio_tokens, dim=-1)
             if self.engine.model.config.use_delay_pattern:
-                audio_out_ids = revert_delay_pattern_full(audio_out_ids)
+                audio_out_ids = revert_delay_pattern(audio_out_ids)
             audio_out_ids = audio_out_ids.clip(0, self.engine.audio_codebook_size - 1)[:, 1:-1]
             if not audio_ids and not db.get_cached_audio_tokens(voice):
                 audio_ids.append(audio_out_ids.cpu())
@@ -888,10 +888,7 @@ class Speech:
             generation_messages.append(Message(role="user", content=text))
             generation_messages.append(Message(role="assistant", content=AudioContent(audio_url="")))
 
-            if (
-                self.generation_chunk_buffer_size
-                and len(generated_audio_ids) > self.generation_chunk_buffer_size
-            ):
+            if (self.generation_chunk_buffer_size and len(generated_audio_ids) > self.generation_chunk_buffer_size):
                 generated_audio_ids[:] = generated_audio_ids[-self.generation_chunk_buffer_size :]
                 generation_messages[:] = generation_messages[(-2 * self.generation_chunk_buffer_size) :]
 
